@@ -1,1 +1,1 @@
-obj-y := my_precious.o
+obj-y := my_precious.o test.o
