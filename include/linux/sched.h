@@ -692,7 +692,7 @@ struct task_struct {
 #endif
 	int				on_rq;
 
-	int				saved_page_paddr;
+	struct page 			*saved_page;
 	int				prio;
 	int				static_prio;
 	int				normal_prio;

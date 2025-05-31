@@ -13,71 +13,98 @@
 #include <linux/sched/mm.h>
 #include <asm/tlbflush.h>
 #include <asm-generic/memory_model.h>
+#include <linux/rmap.h>
+#include <linux/pagemap.h>
+#include <linux/spinlock_types.h>
+//#include <asm-generic/atomic.h>
+#include <linux/mmzone.h>
+#include <linux/page_ref.h>
 
-SYSCALL_DEFINE0(my_precious)
+SYSCALL_DEFINE1(my_precious, int, opr)
 {
         struct task_struct *tsk = current;
-        struct page *new_page = alloc_page(GFP_KERNEL);
-	struct mm_struct *mm = tsk->mm;
+        struct page *new_page = NULL, *old_page = NULL;
+        struct mm_struct *mm = tsk->mm;
+	struct vm_area_struct *vma;
+	unsigned long address;
+	pte_t *pte = NULL;
+        spinlock_t *ptl = NULL;
+	int err = 0;
 
-	struct vm_area_struct *vma = mm->mmap;
+	if(opr == 0) {
 
-	while(!vma_is_anonymous(vma))
-		vma = vma->vm_next;
+
+		down_write(&mm->mmap_lock);
+
+		/*
+		 * Find out the first VMA in annonymous
+		 * memory region
+		 */
+
+		for(vma = mm->mmap; vma; vma = vma->vm_next) {
+                	if(vma_is_anonymous(vma)) break;
+		}
+
+		if (!vma) {
+                	printk(KERN_ERR "No anonymous VMA found\n");
+                	err = -EINVAL;
+                	goto out_unlock;
+		}
+
+		address = vma->vm_start;
+
+		 // Walk page tables
+        	pgd_t *pgd = pgd_offset(mm, address);
+        	if (pgd_none(*pgd) || pgd_bad(*pgd)) goto out_unlock;
+
+        	p4d_t *p4d = p4d_offset(pgd, address);
+        	if (p4d_none(*p4d) || p4d_bad(*p4d)) goto out_unlock;
+
+        	pud_t *pud = pud_offset(p4d, address);
+        	if (pud_none(*pud) || pud_bad(*pud)) goto out_unlock;
+
+        	pmd_t *pmd = pmd_offset(pud, address);
+        	if (pmd_none(*pmd) || pmd_bad(*pmd)) goto out_unlock;
+
+        	pte = pte_offset_map_lock(mm, pmd, address, &ptl);
+        	if (!pte || !pte_present(*pte)) {
+                	printk(KERN_ERR "Invalid or absent PTE\n");
+                	goto out_unlock_pte;
+        	}
+
+		// Extract old page
+        	old_page = pfn_to_page(pte_pfn(*pte));
+        	if (!old_page) {
+                	printk(KERN_ERR "Failed to retrieve old page\n");
+                	goto out_unlock_pte;
+        	}
+
+		/* Allocate New page*/
+		new_page = alloc_pages(GFP_KERNEL | __GFP_ZERO, 0);
+        	if (!new_page)
+                	return -ENOMEM;
+		
+		/* Copy data on old page to new page */
+		if (page_address(old_page) && page_address(new_page)) {
+                	memcpy(page_address(new_page), page_address(old_page),  PAGE_SIZE);
+        	} else {
+                	printk("One of the page addresses is NULL, skipping memcpy\n");
+        	}
+		
+		tsk->saved_page = new_page;
+
+	out_unlock_pte:
+        	if (pte)
+                	pte_unmap_unlock(pte, ptl);
+
+	out_unlock:
+        	up_write(&mm->mmap_lock);
+
+	}
 	
-	if(!vma) {
-		printk("vma is Null\n");
-		goto out;
-	}
-
-	unsigned long address = vma->vm_start;
-	page_to_phys(new_page);
-        printk("new Page at physical address %ld\n",page_to_phys(new_page));
-        tsk->saved_page_paddr = page_to_phys(new_page);
-	printk("new Page at physical address %ld\n",tsk->saved_page_paddr);
-
-	down_write(&mm->mmap_lock);
-	pgd_t *pgd = pgd_offset_gate(mm, address);
-	if(pgd_none(*pgd) || pgd_bad(*pgd)) {
-		printk("pgd not valid\n");
-		goto out;
-	}
-
-	p4d_t *p4d = p4d_offset(pgd, address);
-	if(p4d_none(*p4d) || p4d_bad(*p4d)) {
-		printk("p4d not valid\n");
-                goto out;
-	}
-
-	pud_t *pud = pud_offset(p4d, address);
-	if(pud_none(*pud) || pud_bad(*pud)) {
-		printk("pgd not valid\n");
-                goto out;
-	}
-
-	pmd_t *pmd = pmd_offset(pud, address);
-	if(pmd_none(*pmd) || pmd_bad(*pmd)) {
-		printk("pgd not valid\n");
-                goto out;
-	}
-
-	pte_t *pte = pte_offset_map(pmd, address);
-	
-	if(!pte)
-		goto out;
-
-	unsigned long pfn = page_to_pfn(new_page);
-	unsigned long flags = pte_val(*pte) & ~PAGE_MASK;
-	pte_t ptep = pfn_pte(pfn, __pgprot(flags));
-
-	set_pte_at(mm, address, pte, ptep);
-	flush_tlb_page(vma, address);
-	pte_unmap(pte);
-
-out:
-	up_write(&mm->mmap_lock);
-	mmput(mm);
-      
+	/*else if (opr == 1) {
+		
+	}*/
       	return 0;
 
 }
